@@ -7,7 +7,7 @@ load_dotenv()
 BOT_TOKEN = "8371254653:AAGn68VSqjTSvsDNkh4JSeeLar1gjphmkvg"
 
 # CryptoPay API credentials
-CRYPTOPAY_API_TOKEN = "485798:AAMhknv0iUYX1ZLArcYhR7O4kugDtlq2nDI"
+CRYPTOPAY_API_TOKEN = "487121:AAWizwT4RhpHC0JH5cXgy4Q8hLrUbfDSTaz"
 CRYPTOPAY_API_URL = 'https://pay.crypt.bot/api'
 
 # Admin user IDs (можно добавить через переменную окружения или вручную в БД)
