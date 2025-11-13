@@ -36,18 +36,25 @@ def send_video_message(chat_id, video_filename, caption, reply_markup=None):
     """Отправить видео с подписью, если файла нет — fallback на текст."""
     video_path = os.path.join(BASE_DIR, video_filename)
     try:
-        with open(video_path, 'rb') as video_file:
-            bot.send_video(
-                chat_id,
-                video_file,
-                caption=caption,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
+        # Проверяем существование файла
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        
+        # Используем InputFile для надежной отправки видео
+        video_file = types.InputFile(video_path)
+        bot.send_video(
+            chat_id,
+            video_file,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
     except FileNotFoundError:
         bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode='HTML')
     except Exception as e:
         print(f"Ошибка при отправке видео {video_filename}: {e}")
+        import traceback
+        traceback.print_exc()
         bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode='HTML')
 
 def get_text(user_id, key):
@@ -98,16 +105,19 @@ def start_message(message):
         # Показываем красивое приветствие
         balance = db.get_balance(user_id)
         text = f"""
-🎉 <b>Добро пожаловать!</b>
+👋 <b>Добро пожаловать!</b>
 
-💰 <b>Ваш баланс:</b> {balance:.2f} USDT
 
-✨ <b>Что вы можете сделать:</b>
-• Создать сделку и получить ссылку
-• Оплатить сделку по ссылке
-• Управлять своим балансом
 
-🚀 <b>Начните работу прямо сейчас!</b>
+💼 <b>Надёжный сервис для безопасных сделок!</b>
+
+✨ <b>Автоматизировано, быстро и без лишних хлопот!</b>
+
+🔹 <b>Комиссия за услугу: 0%</b>
+
+🔹 <b>Поддержка 24/7: @anceIorren</b>
+
+💌 <b>Теперь ваши сделки под защитой! 🛡</b>
         """
         
         send_video_message(message.chat.id, 'start.mp4', text, reply_markup=create_main_menu(user_id))
