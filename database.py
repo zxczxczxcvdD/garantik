@@ -70,6 +70,28 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
+
+        # Таблица пополнений
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS topups (
+                topup_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                wallet_id INTEGER,
+                amount REAL NOT NULL,
+                invoice_id TEXT,
+                invoice_url TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (wallet_id) REFERENCES wallets(wallet_id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_invoice_id
+            ON topups(invoice_id)
+            WHERE invoice_id IS NOT NULL AND invoice_id != ''
+        ''')
         
         conn.commit()
         conn.close()
@@ -135,6 +157,18 @@ class Database:
         wallets = cursor.fetchall()
         conn.close()
         return wallets
+    
+    def get_wallet_by_id(self, wallet_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT wallet_id, user_id, display_name, created_at
+            FROM wallets
+            WHERE wallet_id = ?
+        ''', (wallet_id,))
+        wallet = cursor.fetchone()
+        conn.close()
+        return wallet
     
     def create_deal(self, creator_id, deal_type, description, price_usdt, invoice_id=None, invoice_url=None):
         conn = self.get_connection()
@@ -252,4 +286,42 @@ class Database:
         users = cursor.fetchall()
         conn.close()
         return users
+
+    # Методы для пополнений баланса
+    def create_topup(self, user_id, wallet_id, amount, invoice_id, invoice_url):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO topups (user_id, wallet_id, amount, invoice_id, invoice_url)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, wallet_id, amount, invoice_id, invoice_url))
+        topup_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return topup_id
+
+    def get_pending_topups(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT topup_id, user_id, wallet_id, amount, invoice_id
+            FROM topups
+            WHERE status = 'pending' AND invoice_id IS NOT NULL AND invoice_id != ''
+        ''')
+        topups = cursor.fetchall()
+        conn.close()
+        return topups
+
+    def mark_topup_paid(self, topup_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE topups
+            SET status = 'paid', paid_at = CURRENT_TIMESTAMP
+            WHERE topup_id = ? AND status = 'pending'
+        ''', (topup_id,))
+        updated = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return updated > 0
 
