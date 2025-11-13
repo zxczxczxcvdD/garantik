@@ -5,6 +5,7 @@ from database import Database
 from cryptopay import CryptoPay
 import threading
 import time
+import os
 
 # Инициализация
 try:
@@ -28,6 +29,26 @@ if config.ADMIN_IDS:
 
 # Состояния пользователей для обработки ввода
 user_states = {}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def send_video_message(chat_id, video_filename, caption, reply_markup=None):
+    """Отправить видео с подписью, если файла нет — fallback на текст."""
+    video_path = os.path.join(BASE_DIR, video_filename)
+    try:
+        with open(video_path, 'rb') as video_file:
+            bot.send_video(
+                chat_id,
+                video_file,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+    except FileNotFoundError:
+        bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode='HTML')
+    except Exception as e:
+        print(f"Ошибка при отправке видео {video_filename}: {e}")
+        bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode='HTML')
 
 def get_text(user_id, key):
     """Получить текст на языке пользователя"""
@@ -89,7 +110,7 @@ def start_message(message):
 🚀 <b>Начните работу прямо сейчас!</b>
         """
         
-        bot.send_message(message.chat.id, text, reply_markup=create_main_menu(user_id), parse_mode='HTML')
+        send_video_message(message.chat.id, 'start.mp4', text, reply_markup=create_main_menu(user_id))
         print(f"Отправлено главное меню пользователю {user_id}")
     except Exception as e:
         print(f"КРИТИЧЕСКАЯ ОШИБКА в start_message: {e}")
@@ -132,7 +153,8 @@ def handle_my_wallet(message):
         # Показываем список кошельков
         for wallet in wallets:
             wallet_id, display_name, created_at = wallet
-            markup.add(types.KeyboardButton(f"💼 {display_name}"))
+            button_text = f"💼 {display_name} (#{wallet_id})"
+            markup.add(types.KeyboardButton(button_text))
     else:
         text = """
 💼 <b>Мой кошелек</b>
@@ -154,7 +176,7 @@ def handle_my_wallet(message):
 
 📦 <b>Ваши кошельки:</b> {len(wallets)}
 
-Выберите кошелек или создайте новый:
+Выберите кошелек, чтобы просмотреть детали и пополнить баланс, или создайте новый:
     """
     
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='HTML')
@@ -177,6 +199,46 @@ def handle_add_wallet(message):
     """
     
     bot.send_message(message.chat.id, text, reply_markup=create_main_menu(user_id), parse_mode='HTML')
+
+
+@bot.message_handler(func=lambda message: message.text.startswith('💼 ') and '(#' in message.text)
+def handle_wallet_details(message):
+    user_id = message.from_user.id
+    text_parts = message.text
+    
+    try:
+        start_index = text_parts.rfind('(#')
+        end_index = text_parts.rfind(')')
+        if start_index == -1 or end_index == -1 or end_index <= start_index:
+            raise ValueError("Invalid wallet format")
+        wallet_id = int(text_parts[start_index + 2:end_index])
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Не удалось определить выбранный кошелек.", parse_mode='HTML')
+        return
+    
+    wallet = db.get_wallet_by_id(wallet_id)
+    if not wallet or wallet[1] != user_id:
+        bot.send_message(message.chat.id, "❌ Кошелек не найден или вам не принадлежит.", parse_mode='HTML')
+        return
+    
+    _, _, display_name, created_at = wallet
+    balance = db.get_balance(user_id)
+    
+    text = f"""
+💼 <b>Кошелек:</b> {display_name}
+🆔 <b>ID кошелька:</b> #{wallet_id}
+📅 <b>Создан:</b> {created_at}
+
+💰 <b>Текущий баланс:</b> {balance:.2f} USDT
+
+Нажмите кнопку ниже, чтобы создать счет и пополнить баланс через CryptoBot.
+    """
+    
+    inline_markup = types.InlineKeyboardMarkup(row_width=1)
+    inline_markup.add(types.InlineKeyboardButton("➕ Пополнить баланс", callback_data=f"wallet_topup_{wallet_id}"))
+    inline_markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
+    
+    bot.send_message(message.chat.id, text, reply_markup=inline_markup, parse_mode='HTML')
 
 @bot.message_handler(func=lambda message: message.text in ['❌ Отмена', 'Назад', 'Back', '🏠 Главное меню'])
 def handle_back(message):
@@ -313,6 +375,91 @@ def handle_text(message):
     # Проверяем состояние пользователя
     if user_id in user_states:
         state = user_states[user_id]
+        
+        if state.get('step') == 'topup_amount':
+            try:
+                amount = float(message.text.replace(',', '.'))
+                if amount <= 0:
+                    raise ValueError("Amount must be positive")
+            except ValueError:
+                text = """
+❌ <b>Неверная сумма</b>
+
+Введите число больше нуля.
+💡 <b>Пример:</b> 10.5 или 100
+                """
+                bot.send_message(message.chat.id, text, parse_mode='HTML')
+                return
+            
+            wallet_id = state.get('wallet_id')
+            wallet = db.get_wallet_by_id(wallet_id) if wallet_id else None
+            
+            if not wallet or wallet[1] != user_id:
+                del user_states[user_id]
+                bot.send_message(message.chat.id, "❌ Кошелек не найден или вам не принадлежит.", parse_mode='HTML')
+                return
+            
+            wallet_name = state.get('wallet_name') or wallet[2]
+            description = f"Пополнение баланса {wallet_name} (#{wallet_id})"
+            
+            invoice_result = crypto_pay.create_invoice(
+                amount=amount,
+                currency='USDT',
+                description=description
+            )
+            
+            if invoice_result.get('success'):
+                invoice_id = str(invoice_result.get('invoice_id'))
+                invoice_url = invoice_result.get('invoice_url') or invoice_result.get('pay_url')
+                
+                topup_id = db.create_topup(
+                    user_id=user_id,
+                    wallet_id=wallet_id,
+                    amount=amount,
+                    invoice_id=invoice_id,
+                    invoice_url=invoice_url
+                )
+                
+                confirmation_text = f"""
+✅ <b>Счет на пополнение создан!</b>
+
+💼 <b>Кошелек:</b> {wallet_name} (#{wallet_id})
+🆔 <b>ID пополнения:</b> #{topup_id}
+💵 <b>Сумма:</b> {amount:.2f} USDT
+
+🔗 <b>Оплатите счет через кнопку ниже.</b>
+После оплаты средства автоматически поступят на ваш баланс.
+                """
+                
+                inline_markup = types.InlineKeyboardMarkup(row_width=1)
+                if invoice_url:
+                    inline_markup.add(types.InlineKeyboardButton("💳 Оплатить через CryptoBot", url=invoice_url))
+                inline_markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
+                
+                del user_states[user_id]
+                
+                bot.send_message(message.chat.id, confirmation_text, reply_markup=inline_markup, parse_mode='HTML')
+                
+                balance = db.get_balance(user_id)
+                menu_text = f"""
+🏠 <b>Главное меню</b>
+
+💰 <b>Баланс:</b> {balance:.2f} USDT
+
+Выберите действие:
+                """
+                bot.send_message(message.chat.id, menu_text, reply_markup=create_main_menu(user_id), parse_mode='HTML')
+            else:
+                error_message = invoice_result.get('error', 'Unknown error')
+                text = f"""
+❌ <b>Не удалось создать счет.</b>
+
+Причина: {error_message}
+
+Попробуйте ввести сумму снова или нажмите "❌ Отмена".
+                """
+                bot.send_message(message.chat.id, text, parse_mode='HTML')
+            return
         
         # Обработка админ-панели
         if state.get('step') == 'admin_give_user_id':
@@ -557,7 +704,7 @@ def handle_text(message):
                     # Очищаем состояние
                     del user_states[user_id]
                     
-                    bot.send_message(message.chat.id, text, reply_markup=create_main_menu(user_id), parse_mode='HTML')
+                    send_video_message(message.chat.id, 'deal.mp4', text, reply_markup=create_main_menu(user_id))
                 else:
                     text = f"❌ Ошибка при создании счета: {invoice_result.get('error', 'Unknown error')}"
                     bot.send_message(message.chat.id, text, reply_markup=create_main_menu(user_id))
@@ -657,6 +804,44 @@ def handle_deal_link(message, deal_id):
     markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
     
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='HTML')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('wallet_topup_'))
+def handle_wallet_topup(call):
+    user_id = call.from_user.id
+    try:
+        wallet_id = int(call.data.split('_')[2])
+    except (IndexError, ValueError):
+        bot.answer_callback_query(call.id, "❌ Некорректный кошелек", show_alert=True)
+        return
+    
+    wallet = db.get_wallet_by_id(wallet_id)
+    if not wallet or wallet[1] != user_id:
+        bot.answer_callback_query(call.id, "❌ Кошелек не найден", show_alert=True)
+        return
+    
+    _, _, display_name, _ = wallet
+    bot.answer_callback_query(call.id)
+    
+    user_states[user_id] = {
+        'step': 'topup_amount',
+        'wallet_id': wallet_id,
+        'wallet_name': display_name
+    }
+    
+    text = f"""
+➕ <b>Пополнение баланса</b>
+
+💼 <b>Кошелек:</b> {display_name} (#{wallet_id})
+
+💰 <b>Введите сумму в USDT:</b>
+💡 <b>Пример:</b> 10.5 или 100
+    """
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("❌ Отмена"))
+    
+    bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode='HTML')
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pay_balance_'))
 def handle_pay_balance(call):
@@ -794,6 +979,37 @@ def check_pending_payments():
                         bot.send_message(creator_id, notify_text)
                     except Exception as notify_error:
                         print(f"Ошибка уведомления создателя: {notify_error}")
+            
+            # Проверяем пополнения баланса
+            pending_topups = db.get_pending_topups()
+            for topup in pending_topups:
+                topup_id, topup_user_id, wallet_id, amount, invoice_id = topup
+                
+                if not invoice_id:
+                    continue
+                
+                invoice_status = crypto_pay.get_invoice_status(invoice_id)
+                
+                if invoice_status.get('success') and invoice_status.get('paid'):
+                    if db.mark_topup_paid(topup_id):
+                        new_balance = db.add_balance(topup_user_id, amount)
+                        wallet = db.get_wallet_by_id(wallet_id) if wallet_id else None
+                        wallet_name = wallet[2] if wallet else "Основной баланс"
+                        wallet_suffix = f" (#{wallet_id})" if wallet_id else ""
+                        
+                        notify_text = f"""
+💰 <b>Пополнение успешно!</b>
+
+💼 <b>Кошелек:</b> {wallet_name}{wallet_suffix}
+🆔 <b>ID пополнения:</b> #{topup_id}
+💵 <b>Сумма:</b> {amount:.2f} USDT
+
+💰 <b>Ваш текущий баланс:</b> {new_balance:.2f} USDT
+                        """
+                        try:
+                            bot.send_message(topup_user_id, notify_text, parse_mode='HTML')
+                        except Exception as notify_error:
+                            print(f"Ошибка уведомления о пополнении: {notify_error}")
         except Exception as e:
             print(f"Ошибка при проверке платежей: {e}")
             time.sleep(60)  # Увеличиваем интервал при ошибке
